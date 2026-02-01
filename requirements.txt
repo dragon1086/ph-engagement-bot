@@ -1,0 +1,20 @@
+# PH Engagement Bot Dependencies
+
+# Telegram Bot
+python-telegram-bot>=20.0
+
+# AI Comment Generation
+anthropic>=0.18.0
+
+# Scheduling
+apscheduler>=3.10.0
+
+# Web Scraping (backup for when MCP unavailable)
+httpx>=0.25.0
+beautifulsoup4>=4.12.0
+
+# Environment
+python-dotenv>=1.0.0
+
+# Database
+# (uses built-in sqlite3)
