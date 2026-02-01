@@ -59,7 +59,8 @@ class PHEngagementBot:
             on_approve=self.on_post_approved,
             on_login_request=self.on_login_request,
             on_login_verify=self.on_login_verify,
-            on_execute=self.on_execute_action
+            on_execute=self.on_execute_action,
+            on_run=self.run_engagement_check
         )
         self.telegram_handler.setup(self.telegram_app)
 
@@ -210,8 +211,8 @@ class PHEngagementBot:
                         post.description = details.get("description", "")
                         post.maker_name = details.get("maker_name", "")
 
-                # Generate comments
-                comments = await generator.generate(post)
+                # Generate comments (returns tuple: summary_ko, comments)
+                summary_ko, comments = await generator.generate(post)
 
                 # Store post
                 storage.add_post(
@@ -222,8 +223,8 @@ class PHEngagementBot:
                     category=post.category
                 )
 
-                # Send approval request
-                await self.telegram_handler.send_approval(post, comments)
+                # Send approval request with Korean summary
+                await self.telegram_handler.send_approval(post, comments, summary_ko=summary_ko)
 
                 # Small delay between posts
                 await asyncio.sleep(2)

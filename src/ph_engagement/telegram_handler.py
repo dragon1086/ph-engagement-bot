@@ -41,11 +41,13 @@ class TelegramHandler:
     def __init__(self, on_approve: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
                  on_login_request: Optional[Callable[[], Awaitable[tuple]]] = None,
                  on_login_verify: Optional[Callable[[], Awaitable[tuple]]] = None,
-                 on_execute: Optional[Callable[[str, str], Awaitable[tuple]]] = None):
+                 on_execute: Optional[Callable[[str, str], Awaitable[tuple]]] = None,
+                 on_run: Optional[Callable[[], Awaitable[None]]] = None):
         self.on_approve = on_approve
         self.on_login_request = on_login_request  # Returns (success, screenshot_path)
         self.on_login_verify = on_login_verify    # Returns (is_logged_in, screenshot_path)
         self.on_execute = on_execute              # Returns (like_ok, comment_ok, screenshot_path)
+        self.on_run = on_run                      # Triggers engagement check
         self.pending_edits: dict = {}
         self.app: Optional[Application] = None
 
@@ -97,13 +99,13 @@ class TelegramHandler:
         logger.info("Telegram handlers registered")
 
     async def send_approval(self, post: PHPost, comments: List[dict],
-                            chat_id: Optional[str] = None) -> int:
+                            chat_id: Optional[str] = None, summary_ko: str = "") -> int:
         """Send approval request to Telegram."""
         if not self.app:
             raise RuntimeError("App not initialized")
 
         target = chat_id or config.TELEGRAM_CHAT_ID
-        message = self._format_message(post, comments)
+        message = self._format_message(post, comments, summary_ko)
         keyboard = self._create_keyboard(post.post_id, len(comments))
 
         sent = await self.app.bot.send_message(
@@ -129,24 +131,33 @@ class TelegramHandler:
         logger.info(f"Sent approval for: {post.title}")
         return sent.message_id
 
-    def _format_message(self, post: PHPost, comments: List[dict]) -> str:
-        """Format approval message."""
+    def _format_message(self, post: PHPost, comments: List[dict], summary_ko: str = "") -> str:
+        """Format approval message with Korean translations."""
         title = self._escape_html(post.title)
         tagline = self._escape_html(post.tagline or "No tagline")
+        summary = self._escape_html(summary_ko) if summary_ko else ""
 
         msg = f"""🆕 <b>New Product Hunt Post</b>
 
 📦 <b>{title}</b>
 <i>{tagline}</i>
+"""
+        if summary:
+            msg += f"\n🇰🇷 <b>상품 요약:</b> {summary}\n"
 
+        msg += f"""
 🔗 {post.url}
 
 💬 <b>Comment Options:</b>
 """
         for i, c in enumerate(comments, 1):
             text = self._escape_html(c.get("comment", ""))
+            text_ko = self._escape_html(c.get("comment_ko", ""))
             angle = c.get("angle", "general")
-            msg += f"\n<b>{i}. [{angle}]</b>\n\"{text}\"\n"
+            msg += f"\n<b>{i}. [{angle}]</b>\n"
+            msg += f"🇺🇸 \"{text}\"\n"
+            if text_ko:
+                msg += f"🇰🇷 \"{text_ko}\"\n"
 
         msg += "\n<i>Select a comment or action:</i>"
         return msg
@@ -158,20 +169,19 @@ class TelegramHandler:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     def _create_keyboard(self, post_id: str, num_comments: int) -> InlineKeyboardMarkup:
-        """Create inline keyboard."""
+        """Create inline keyboard - simplified: #1/#2/#3 directly approve."""
         buttons = []
 
-        # Comment selection row
-        comment_btns = [
-            InlineKeyboardButton(f"#{i}", callback_data=f"{SELECT}{post_id}:{i}")
+        # Direct approve buttons (clicking approves immediately)
+        approve_btns = [
+            InlineKeyboardButton(f"✅ #{i}", callback_data=f"{APPROVE}{post_id}:{i}")
             for i in range(1, num_comments + 1)
         ]
-        if comment_btns:
-            buttons.append(comment_btns)
+        if approve_btns:
+            buttons.append(approve_btns)
 
-        # Action row
+        # Edit and Skip row
         buttons.append([
-            InlineKeyboardButton("✅ Approve #1", callback_data=f"{APPROVE}{post_id}:1"),
             InlineKeyboardButton("✏️ Edit", callback_data=f"{EDIT}{post_id}"),
             InlineKeyboardButton("❌ Skip", callback_data=f"{SKIP}{post_id}")
         ])
@@ -460,7 +470,13 @@ class TelegramHandler:
             "🚀 Starting engagement check...\n\n"
             "This will scrape PH and send approval requests."
         )
-        # The actual run is triggered in __main__.py via callback
+
+        if self.on_run:
+            try:
+                await self.on_run()
+            except Exception as e:
+                logger.error(f"Engagement run failed: {e}")
+                await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
     async def cmd_execute(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Execute approved posts via browser."""
@@ -513,10 +529,24 @@ class TelegramHandler:
                             f"💬 Commented: {'Yes' if comment_ok else 'No'}"
                         )
                     else:
+                        # Check if screenshot shows CAPTCHA
                         await self.send_screenshot(
                             screenshot,
-                            f"❌ <b>Failed:</b> {post['post_title'][:50]}"
+                            f"🛡️ <b>CAPTCHA Detected!</b>\n\n"
+                            f"Post: {post['post_title'][:50]}\n\n"
+                            f"Please solve the CAPTCHA via VNC/Screen Share,\n"
+                            f"then run /ph_execute again."
                         )
+                        # Stop processing - user needs to solve CAPTCHA
+                        await update.message.reply_text(
+                            "⏸️ <b>Execution paused</b>\n\n"
+                            "CAPTCHA blocking automation.\n"
+                            "1. Connect to Mac via VNC\n"
+                            "2. Solve the CAPTCHA in browser\n"
+                            "3. Run /ph_execute again",
+                            parse_mode="HTML"
+                        )
+                        return  # Stop execution loop
 
                     # Delay between posts
                     import asyncio
@@ -554,7 +584,7 @@ class TelegramHandler:
             "/ph_stop - Emergency stop\n"
             "/ph_help - This message\n\n"
             "<b>Approval Buttons:</b>\n"
-            "✅ Approve - Like + comment with selected text\n"
+            "✅ #1/#2/#3 - Approve with that comment\n"
             "✏️ Edit - Write custom comment\n"
             "❌ Skip - Skip this post",
             parse_mode="HTML"

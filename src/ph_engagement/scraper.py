@@ -1,14 +1,12 @@
 """
-Product Hunt Scraper
+Product Hunt Scraper - Firecrawl-based for JS-rendered content
 """
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import httpx
-from bs4 import BeautifulSoup
+from firecrawl import FirecrawlApp
 
 from .config import config
 from .storage import storage
@@ -42,28 +40,25 @@ class PHPost:
 
 
 class Scraper:
-    """Product Hunt scraper."""
+    """Product Hunt scraper using Firecrawl."""
 
     def __init__(self):
-        self.client = httpx.AsyncClient(
-            headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                              "Chrome/120.0.0.0 Safari/537.36"
-            },
-            follow_redirects=True,
-            timeout=30.0
-        )
+        self.app = FirecrawlApp(api_key=config.FIRECRAWL_API_KEY) if config.FIRECRAWL_API_KEY else None
 
     async def scrape_homepage(self) -> List[PHPost]:
         """Scrape Product Hunt homepage."""
-        logger.info("Scraping PH homepage...")
+        logger.info("Scraping PH homepage with Firecrawl...")
         posts = []
 
+        if not self.app:
+            logger.error("Firecrawl API key not configured")
+            return posts
+
         try:
-            response = await self.client.get(config.PH_BASE_URL)
-            response.raise_for_status()
-            posts = self._parse_html(response.text, "homepage")
+            result = self.app.scrape(config.PH_BASE_URL, formats=['markdown', 'links'])
+
+            markdown = result.markdown or ""
+            posts = self._parse_markdown(markdown, "homepage")
             logger.info(f"Found {len(posts)} posts on homepage")
         except Exception as e:
             logger.error(f"Error scraping homepage: {e}")
@@ -72,14 +67,18 @@ class Scraper:
 
     async def scrape_category(self, category: str) -> List[PHPost]:
         """Scrape specific category."""
-        url = f"{config.PH_BASE_URL}/categories/{category}"
+        url = f"{config.PH_BASE_URL}/topics/{category}"
         logger.info(f"Scraping category: {category}")
         posts = []
 
+        if not self.app:
+            logger.error("Firecrawl API key not configured")
+            return posts
+
         try:
-            response = await self.client.get(url)
-            response.raise_for_status()
-            posts = self._parse_html(response.text, category)
+            result = self.app.scrape(url, formats=['markdown', 'links'])
+            markdown = result.markdown or ""
+            posts = self._parse_markdown(markdown, category)
             logger.info(f"Found {len(posts)} posts in {category}")
         except Exception as e:
             logger.error(f"Error scraping {category}: {e}")
@@ -105,65 +104,76 @@ class Scraper:
 
     async def get_post_details(self, post_url: str) -> Optional[Dict[str, str]]:
         """Get detailed info about a post."""
+        if not self.app:
+            return None
+
         try:
-            response = await self.client.get(post_url)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
+            logger.info(f"Fetching product details: {post_url}")
+            result = self.app.scrape(post_url, formats=['markdown'])
+            markdown = result.markdown or ""
 
-            # Extract description from meta
-            desc_meta = soup.find("meta", {"property": "og:description"})
-            description = desc_meta["content"] if desc_meta else ""
+            # Extract meaningful description (skip image links, headers, navigation)
+            lines = []
+            for line in markdown.split('\n'):
+                line = line.strip()
+                # Skip empty, images, links, headers, navigation items
+                if not line:
+                    continue
+                if line.startswith('!') or line.startswith('#') or line.startswith('['):
+                    continue
+                if line.startswith('-') or line.startswith('•'):
+                    continue
+                if len(line) < 20:  # Skip short lines (likely UI elements)
+                    continue
+                # This is likely content
+                lines.append(line)
+                if len(' '.join(lines)) > 500:
+                    break
 
-            # Try to find maker name
-            maker_elem = soup.find(attrs={"data-test": "maker-link"})
-            maker_name = maker_elem.text.strip() if maker_elem else ""
+            description = ' '.join(lines)[:1000]
+            logger.info(f"Got description ({len(description)} chars)")
 
             return {
-                "description": description[:1000],
-                "maker_name": maker_name
+                "description": description,
+                "maker_name": ""
             }
         except Exception as e:
             logger.error(f"Error getting post details: {e}")
             return None
 
-    def _parse_html(self, html: str, category: str) -> List[PHPost]:
-        """Parse posts from HTML."""
+    def _parse_markdown(self, markdown: str, category: str) -> List[PHPost]:
+        """Parse posts from Firecrawl markdown."""
         posts = []
-        soup = BeautifulSoup(html, "html.parser")
 
-        # Find post links - PH uses various selectors
-        post_links = soup.find_all("a", href=re.compile(r"^/posts/"))
+        # Pattern: [1\. ProductName](url) - note the escaped backslash before period
+        # Match: [number\. Title](https://www.producthunt.com/products/slug)
+        pattern = r'\[(\d+)\\\\?\.\s*([^\]]+)\]\((https://www\.producthunt\.com/products/([^)]+))\)'
 
+        matches = re.findall(pattern, markdown)
         seen_ids = set()
-        for link in post_links[:30]:  # Limit to 30
-            href = link.get("href", "")
-            if not href.startswith("/posts/"):
-                continue
 
-            # Extract post ID from URL
-            slug = href.replace("/posts/", "").split("?")[0].split("#")[0]
-            if not slug or slug in seen_ids:
+        for match in matches[:20]:  # Limit to 20 posts
+            rank, title, url, slug = match
+
+            if slug in seen_ids:
                 continue
             seen_ids.add(slug)
 
-            # Get title
-            title = link.text.strip()
-            if not title or len(title) < 3:
-                continue
-
-            # Find tagline (usually nearby)
+            # Find tagline - text after the link, before next section
             tagline = ""
-            parent = link.parent
-            if parent:
-                tagline_elem = parent.find_next("p")
-                if tagline_elem:
-                    tagline = tagline_elem.text.strip()[:200]
+            link_pos = markdown.find(url)
+            if link_pos > 0:
+                after_link = markdown[link_pos + len(url):link_pos + len(url) + 200]
+                # Get first line of text after the link
+                lines = [l.strip() for l in after_link.split('\n') if l.strip() and not l.startswith('[') and not l.startswith('!')]
+                if lines:
+                    tagline = lines[0][:150]
 
             post = PHPost(
                 post_id=slug,
-                title=title,
+                title=title.strip()[:100],
                 tagline=tagline,
-                url=f"{config.PH_BASE_URL}/posts/{slug}",
+                url=url,
                 category=category
             )
             posts.append(post)
@@ -171,8 +181,8 @@ class Scraper:
         return posts
 
     async def close(self):
-        """Close HTTP client."""
-        await self.client.aclose()
+        """Cleanup (no-op for Firecrawl)."""
+        pass
 
 
 scraper = Scraper()

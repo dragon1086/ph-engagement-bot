@@ -12,6 +12,7 @@ from typing import Optional, Tuple
 from datetime import datetime
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright_stealth import Stealth
 
 from .config import config
 from .session_manager import session_manager, SessionState
@@ -37,46 +38,84 @@ class BrowserDriver:
         self.page: Optional[Page] = None
         self.screenshots_dir = config.BASE_DIR / "screenshots"
         self.screenshots_dir.mkdir(exist_ok=True)
+        self._browser_ready = False  # Track if browser is ready for use
 
-    async def start(self, headless: bool = True):
-        """Start the browser."""
-        if self.browser:
+    async def start(self, headless: bool = True, use_profile: bool = True):
+        """Start the browser.
+
+        Args:
+            headless: Run without visible window
+            use_profile: Use persistent Chrome profile (recommended for avoiding CAPTCHA)
+        """
+        if self.browser and self._browser_ready:
+            logger.info("Reusing existing browser session")
             return
 
-        logger.info(f"Starting browser (headless={headless})")
+        logger.info(f"Starting browser (headless={headless}, use_profile={use_profile})")
         self.playwright = await async_playwright().start()
 
-        self.browser = await self.playwright.chromium.launch(
-            headless=headless,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-            ]
+        if use_profile:
+            # Use persistent context with Chrome profile - much better for avoiding CAPTCHA
+            user_data_dir = config.BASE_DIR / "chrome_profile"
+            user_data_dir.mkdir(exist_ok=True)
+
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                user_data_dir=str(user_data_dir),
+                headless=headless,
+                viewport={'width': 1280, 'height': 800},
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                ]
+            )
+            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+            self.browser = None  # Not used with persistent context
+        else:
+            self.browser = await self.playwright.chromium.launch(
+                headless=headless,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                ]
+            )
+
+            # Try to load existing cookies
+            storage_state = None
+            if config.COOKIE_PATH.exists():
+                try:
+                    storage_state = str(config.COOKIE_PATH)
+                    logger.info("Loading saved cookies")
+                except Exception as e:
+                    logger.warning(f"Failed to load cookies: {e}")
+
+            self.context = await self.browser.new_context(
+                storage_state=storage_state,
+                viewport={'width': 1280, 'height': 800},
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+            )
+            self.page = await self.context.new_page()
+
+        # Apply stealth to avoid bot detection
+        stealth = Stealth(
+            navigator_platform_override='MacIntel',
+            navigator_vendor_override='Google Inc.',
         )
+        await stealth.apply_stealth_async(self.page)
+        self._browser_ready = True
+        logger.info("Browser started with stealth mode and persistent profile")
 
-        # Try to load existing cookies
-        storage_state = None
-        if config.COOKIE_PATH.exists():
-            try:
-                storage_state = str(config.COOKIE_PATH)
-                logger.info("Loading saved cookies")
-            except Exception as e:
-                logger.warning(f"Failed to load cookies: {e}")
+    async def stop(self, force: bool = False):
+        """Stop the browser.
 
-        self.context = await self.browser.new_context(
-            storage_state=storage_state,
-            viewport={'width': 1280, 'height': 800},
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        )
+        Args:
+            force: If True, fully close everything. If False, keep profile for reuse.
+        """
+        if not force and self._browser_ready:
+            logger.info("Keeping browser session alive for reuse")
+            return
 
-        self.page = await self.context.new_page()
-        logger.info("Browser started")
-
-    async def stop(self):
-        """Stop the browser."""
         if self.context:
-            # Save cookies before closing
-            await self.save_cookies()
             await self.context.close()
         if self.browser:
             await self.browser.close()
@@ -87,6 +126,7 @@ class BrowserDriver:
         self.context = None
         self.browser = None
         self.playwright = None
+        self._browser_ready = False
         logger.info("Browser stopped")
 
     async def save_cookies(self):
@@ -114,6 +154,49 @@ class BrowserDriver:
         except Exception as e:
             logger.error(f"Failed to take screenshot: {e}")
             return None
+
+    async def check_captcha(self) -> bool:
+        """Check if CAPTCHA/human verification is present."""
+        if not self.page:
+            return False
+
+        captcha_indicators = [
+            'text="Verify you are human"',
+            'text="verify you are human"',
+            'iframe[title*="challenge"]',
+            '#challenge-running',
+            '.cf-turnstile',
+            'iframe[src*="challenges.cloudflare.com"]',
+        ]
+
+        for selector in captcha_indicators:
+            try:
+                element = await self.page.query_selector(selector)
+                if element:
+                    logger.warning(f"CAPTCHA detected: {selector}")
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    async def wait_for_captcha_resolution(self, timeout: int = 120) -> bool:
+        """
+        Wait for user to solve CAPTCHA manually.
+        Returns True if CAPTCHA resolved, False if timeout.
+        """
+        logger.info(f"Waiting up to {timeout}s for CAPTCHA resolution...")
+        start_time = asyncio.get_event_loop().time()
+
+        while (asyncio.get_event_loop().time() - start_time) < timeout:
+            if not await self.check_captcha():
+                logger.info("CAPTCHA resolved!")
+                await asyncio.sleep(2)  # Wait for page to load after CAPTCHA
+                return True
+            await asyncio.sleep(3)  # Check every 3 seconds
+
+        logger.warning("CAPTCHA resolution timeout")
+        return False
 
     # ============================================================
     # Login Methods
@@ -355,7 +438,27 @@ class BrowserDriver:
 
         Returns:
             (like_success, comment_success, screenshot_path)
+            If CAPTCHA detected, returns (False, False, screenshot) with CAPTCHA screenshot
         """
+        if not self.page:
+            await self.start()
+
+        # Navigate to post first
+        try:
+            await self.page.goto(post_url, wait_until='networkidle')
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"Failed to navigate: {e}")
+            screenshot = await self.take_screenshot("navigate_error")
+            return False, False, screenshot
+
+        # Check for CAPTCHA
+        if await self.check_captcha():
+            logger.warning("CAPTCHA detected! Manual intervention required.")
+            screenshot = await self.take_screenshot("captcha_detected")
+            # Return special result - caller should notify user
+            return False, False, screenshot
+
         like_ok, _ = await self.like_post(post_url)
 
         # Random delay between actions

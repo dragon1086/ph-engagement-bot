@@ -34,6 +34,9 @@ class Config:
     # Anthropic API
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 
+    # Firecrawl API
+    FIRECRAWL_API_KEY: str = os.getenv("FIRECRAWL_API_KEY", "")
+
     # Paths
     BASE_DIR: Path = Path(__file__).parent.parent.parent
     DB_PATH: Path = BASE_DIR / "ph_engagement.db"

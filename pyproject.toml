@@ -7,7 +7,7 @@ name = "ph-engagement-bot"
 version = "1.0.0"
 description = "Semi-automated Product Hunt engagement with Telegram approval"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "Your Name", email = "your@email.com"}

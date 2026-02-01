@@ -38,3 +38,11 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Browser data
+chrome_profile/
+screenshots/
+session_state.json
+
+# OMC state
+.omc/state/checkpoints/

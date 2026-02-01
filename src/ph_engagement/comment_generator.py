@@ -17,22 +17,38 @@ PROMPT_TEMPLATE = """Generate genuine, helpful Product Hunt comments for this pr
 
 **Product**: {title}
 **Tagline**: {tagline}
-**Description**: {description}
+**Full Description**: {description}
 **Category**: {category}
 
+IMPORTANT: Read the description carefully before writing comments. Your comments should:
+- Reference specific features mentioned in the description
+- Ask questions that aren't already answered
+- Show you actually understand what this product does
+
 Guidelines:
-- Be specific about THIS product's features
-- Ask genuine questions (usage, roadmap, tech stack)
+- Be specific about THIS product's unique features
+- Ask genuine questions (usage, roadmap, tech stack, pricing)
 - Keep it conversational (2-4 sentences)
-- Sound like a real developer, not a bot
+- Sound like a real developer/user, not a bot
 
 AVOID:
 - Generic praise ("Great job!", "Love this!")
-- Questions answered in the description
+- Questions that are already answered in the description
 - Self-promotion
+- Vague comments that could apply to any product
 
-Generate {num} different comment options. Output as JSON array:
-[{{"comment": "...", "angle": "question|feedback|use_case"}}]
+Generate {num} different comment options. For each comment, provide:
+1. English comment (for actual submission)
+2. Korean translation (한글 번역 - for reviewer understanding)
+3. Korean product summary (상품 요약)
+
+Output as JSON:
+{{
+  "product_summary_ko": "이 상품에 대한 간략한 한글 설명 (1-2문장, 주요 기능 포함)",
+  "comments": [
+    {{"comment": "English comment...", "comment_ko": "한글 번역...", "angle": "question|feedback|use_case"}}
+  ]
+}}
 """
 
 
@@ -43,8 +59,8 @@ class CommentGenerator:
         self.client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
         self.model = "claude-sonnet-4-20250514"
 
-    async def generate(self, post: PHPost, num: int = 3) -> List[dict]:
-        """Generate comment variations for a post."""
+    async def generate(self, post: PHPost, num: int = 3) -> tuple:
+        """Generate comment variations for a post. Returns (product_summary_ko, comments)."""
         logger.info(f"Generating {num} comments for: {post.title}")
 
         prompt = PROMPT_TEMPLATE.format(
@@ -58,38 +74,60 @@ class CommentGenerator:
         try:
             response = await self.client.messages.create(
                 model=self.model,
-                max_tokens=1024,
+                max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}]
             )
 
             content = response.content[0].text
-            comments = self._parse_response(content)
+            result = self._parse_response(content)
+
+            if isinstance(result, dict):
+                summary_ko = result.get("product_summary_ko", "")
+                comments = result.get("comments", [])
+            else:
+                summary_ko = ""
+                comments = result if result else []
 
             if not comments:
                 comments = self._fallback_comments(post)
 
             logger.info(f"Generated {len(comments)} comments")
-            return comments
+            return summary_ko, comments
 
         except Exception as e:
             logger.error(f"Error generating comments: {e}")
-            return self._fallback_comments(post)
+            return "", self._fallback_comments(post)
 
-    def _parse_response(self, content: str) -> List[dict]:
-        """Parse JSON from Claude response."""
+    def _parse_response(self, content: str):
+        """Parse JSON from Claude response. Returns dict with product_summary_ko and comments."""
         try:
+            # Try to parse full JSON object first
+            match = re.search(r'\{[\s\S]*\}', content)
+            if match:
+                data = json.loads(match.group())
+                if "comments" in data:
+                    return data
+                # If it's a single comment object, wrap it
+                if "comment" in data:
+                    return {"product_summary_ko": "", "comments": [data]}
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            # Try array format
             match = re.search(r'\[[\s\S]*\]', content)
             if match:
-                return json.loads(match.group())
+                comments = json.loads(match.group())
+                return {"product_summary_ko": "", "comments": comments}
         except json.JSONDecodeError:
             pass
 
         # Fallback: extract quoted strings
         comments = []
         for match in re.finditer(r'"comment":\s*"([^"]+)"', content):
-            comments.append({"comment": match.group(1), "angle": "general"})
+            comments.append({"comment": match.group(1), "comment_ko": "", "angle": "general"})
 
-        return comments[:config.COMMENT_VARIATIONS]
+        return {"product_summary_ko": "", "comments": comments[:config.COMMENT_VARIATIONS]}
 
     def _fallback_comments(self, post: PHPost) -> List[dict]:
         """Fallback comments if AI fails."""
