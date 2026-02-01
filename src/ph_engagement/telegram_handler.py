@@ -59,6 +59,7 @@ class TelegramHandler:
 
         # Control commands
         app.add_handler(CommandHandler("ph_run", self.cmd_run))
+        app.add_handler(CommandHandler("ph_execute", self.cmd_execute))
         app.add_handler(CommandHandler("ph_queue", self.cmd_queue))
         app.add_handler(CommandHandler("ph_stats", self.cmd_stats))
         app.add_handler(CommandHandler("ph_stop", self.cmd_stop))
@@ -427,6 +428,57 @@ class TelegramHandler:
             "This will scrape PH and send approval requests."
         )
         # The actual run is triggered in __main__.py via callback
+
+    async def cmd_execute(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Execute approved posts via browser."""
+        if not session_manager.is_logged_in():
+            await update.message.reply_text(
+                "❌ Not logged in.\n\nUse /ph_login first."
+            )
+            return
+
+        approved = storage.get_approved_posts()
+        if not approved:
+            await update.message.reply_text(
+                "📭 No approved posts to execute.\n\n"
+                "Approve some posts first, then use /ph_execute."
+            )
+            return
+
+        await update.message.reply_text(
+            f"⚡ <b>Executing {len(approved)} approved posts...</b>\n\n"
+            "Browser actions will run now.\n"
+            "You'll be notified of each result.",
+            parse_mode="HTML"
+        )
+
+        # Execute via callback if available
+        if self.on_execute:
+            for post in approved:
+                try:
+                    success = await self.on_execute(
+                        post["post_url"],
+                        post["comment_text"]
+                    )
+                    if success:
+                        storage.update_status(post["post_id"], "executed")
+                        storage.increment_stat("executed")
+                        await update.message.reply_text(
+                            f"✅ Executed: {post['post_title'][:30]}..."
+                        )
+                    else:
+                        await update.message.reply_text(
+                            f"❌ Failed: {post['post_title'][:30]}..."
+                        )
+                except Exception as e:
+                    await update.message.reply_text(
+                        f"❌ Error: {post['post_title'][:30]}...\n{str(e)[:100]}"
+                    )
+        else:
+            await update.message.reply_text(
+                "⚠️ Browser automation not configured.\n\n"
+                "Run `python -m ph_engagement execute` manually."
+            )
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show help message."""

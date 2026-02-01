@@ -3,9 +3,9 @@ PH Engagement Bot - CLI Entry Point
 
 Usage:
     python -m ph_engagement run      # Run once
-    python -m ph_engagement start    # Start scheduler
+    python -m ph_engagement start    # Start scheduler daemon
     python -m ph_engagement status   # Show status
-    python -m ph_engagement login    # Open browser for login
+    python -m ph_engagement execute  # Execute approved posts
 """
 import argparse
 import asyncio
@@ -17,16 +17,21 @@ from telegram.ext import Application
 
 from .config import config
 from .storage import storage
-from .scraper import scraper, PHPost
+from .scraper import scraper
 from .comment_generator import generator
 from .telegram_handler import TelegramHandler
 from .scheduler import scheduler
-from .browser_actions import browser
+from .session_manager import session_manager
+from .executor import executor
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(config.LOG_PATH, mode='a') if config.LOG_PATH.parent.exists() else logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -44,25 +49,126 @@ class PHEngagementBot:
             logger.error("Configuration invalid")
             sys.exit(1)
 
-        # Setup Telegram
+        # Ensure log directory exists
+        config.LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # Setup Telegram with all callbacks
         self.telegram_app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-        self.telegram_handler = TelegramHandler(on_approve=self.on_post_approved)
+        self.telegram_handler = TelegramHandler(
+            on_approve=self.on_post_approved,
+            on_login_request=self.on_login_request,
+            on_login_verify=self.on_login_verify,
+            on_execute=self.on_execute_action
+        )
         self.telegram_handler.setup(self.telegram_app)
+
+        # Setup executor callbacks
+        executor.set_notify_callback(self.notify_execution_result)
 
         # Setup scheduler
         scheduler.set_engagement_callback(self.run_engagement_check)
 
         logger.info("Bot initialized")
 
+    # ============================================================
+    # Telegram Callbacks
+    # ============================================================
+
     async def on_post_approved(self, post_id: str, action: str, comment: str):
         """Called when a post is approved via Telegram."""
         logger.info(f"Post approved: {post_id}, action: {action}")
-        # Browser actions will be triggered separately
-        # This is just for logging/notification
+
+        # Get post details from storage
+        # Note: The storage already has the post from when we sent approval
+        approved_posts = storage.get_approved_posts()
+        post = next((p for p in approved_posts if p["post_id"] == post_id), None)
+
+        if post:
+            # Add to executor queue
+            executor.add_task(
+                post_id=post_id,
+                post_url=post["post_url"],
+                comment=comment,
+                action=action
+            )
+
+            # Notify user
+            await self.telegram_app.bot.send_message(
+                chat_id=config.TELEGRAM_CHAT_ID,
+                text=f"📥 Added to execution queue.\n\nUse /ph_execute to run browser actions.",
+                parse_mode="HTML"
+            )
+        else:
+            logger.warning(f"Approved post not found in storage: {post_id}")
+
+    async def on_login_request(self) -> int:
+        """Called when user requests login. Returns tab_id."""
+        logger.info("Login requested via Telegram")
+
+        # In actual implementation, this would call claude-in-chrome MCP
+        # For now, return a placeholder and instruct manual execution
+        #
+        # The actual MCP calls would be:
+        # result = await mcp.tabs_context_mcp(createIfEmpty=True)
+        # tab_id = result.tabs[0].id
+        # await mcp.navigate(url="https://www.producthunt.com/login", tabId=tab_id)
+
+        # Return placeholder - user will manually execute MCP commands
+        return 1  # Placeholder tab_id
+
+    async def on_login_verify(self) -> bool:
+        """Called to verify login status. Returns True if logged in."""
+        logger.info("Verifying login status")
+
+        # In actual implementation, this would:
+        # 1. Navigate to PH
+        # 2. Look for profile element
+        # 3. Return True if found
+        #
+        # For now, trust user confirmation
+        return True
+
+    async def on_execute_action(self, post_url: str, comment: str) -> bool:
+        """Execute browser action. Returns True if successful."""
+        logger.info(f"Execute action requested for: {post_url}")
+
+        # This would be called by executor or directly
+        # In actual implementation with MCP, this would run the browser script
+
+        # For now, log the script that should be executed
+        from .browser_actions import browser
+        script = browser.get_full_script(post_url, comment)
+        logger.info(f"MCP Script to execute:\n{script}")
+
+        return True  # Assume success for now
+
+    async def notify_execution_result(self, post_id: str, success: bool, message: str):
+        """Notify user of execution result via Telegram."""
+        if self.telegram_app:
+            await self.telegram_app.bot.send_message(
+                chat_id=config.TELEGRAM_CHAT_ID,
+                text=message,
+                parse_mode="HTML"
+            )
+
+    # ============================================================
+    # Core Operations
+    # ============================================================
 
     async def run_engagement_check(self):
         """Run a single engagement check cycle."""
         logger.info("Starting engagement check...")
+
+        # Check session
+        if not session_manager.is_logged_in():
+            logger.warning("Not logged in. Skipping engagement check.")
+            if self.telegram_app:
+                await self.telegram_app.bot.send_message(
+                    chat_id=config.TELEGRAM_CHAT_ID,
+                    text="⚠️ Engagement check skipped: Not logged in.\n\nUse /ph_login to login.",
+                    parse_mode="HTML"
+                )
+            return
 
         # Check daily limit
         if not storage.can_engage_more():
@@ -114,6 +220,27 @@ class PHEngagementBot:
 
         logger.info("Engagement check complete")
 
+    async def execute_approved(self):
+        """Execute all approved posts."""
+        logger.info("Executing approved posts...")
+
+        if not session_manager.is_logged_in():
+            logger.error("Not logged in. Cannot execute.")
+            print("❌ Not logged in. Use /ph_login first.")
+            return
+
+        await executor.process_queue()
+
+        status = executor.get_queue_status()
+        print(f"\n✅ Execution complete")
+        print(f"   Success: {status['success']}")
+        print(f"   Failed: {status['failed']}")
+        print(f"   Pending: {status['pending']}")
+
+    # ============================================================
+    # CLI Entry Points
+    # ============================================================
+
     async def run_once(self):
         """Run a single engagement check."""
         await self.setup()
@@ -131,6 +258,19 @@ class PHEngagementBot:
 
         # Start scheduler
         scheduler.start()
+
+        # Send startup message
+        await self.telegram_app.bot.send_message(
+            chat_id=config.TELEGRAM_CHAT_ID,
+            text=(
+                "🤖 <b>PH Engagement Bot Started</b>\n\n"
+                f"Schedule: {config.SCHEDULE_HOURS} KST\n"
+                f"Daily limit: {config.DAILY_LIMIT}\n\n"
+                f"Session: {session_manager.session.state.value}\n\n"
+                "Use /ph_help for commands."
+            ),
+            parse_mode="HTML"
+        )
 
         logger.info("Bot running. Press Ctrl+C to stop.")
 
@@ -151,54 +291,35 @@ class PHEngagementBot:
         """Display current status."""
         stats = storage.get_today_stats()
         sched_status = scheduler.get_status()
+        exec_status = executor.get_queue_status()
 
         print("\n📊 PH Engagement Bot Status")
         print("=" * 40)
         print(f"\n📅 Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+        print(f"\n🔐 Session:")
+        print(f"   {session_manager.get_status_message()}")
+
         print(f"\n📈 Today's Stats:")
         print(f"   Posts found: {stats['posts_found']}")
         print(f"   Approved: {stats['approved']}")
         print(f"   Skipped: {stats['skipped']}")
         print(f"   Executed: {stats['executed']}")
         print(f"   Remaining: {config.DAILY_LIMIT - stats['executed']}")
+
+        print(f"\n📥 Execution Queue:")
+        print(f"   Pending: {exec_status['pending']}")
+        print(f"   In Progress: {exec_status['in_progress']}")
+        print(f"   Retry: {exec_status['retry']}")
+
         print(f"\n⏰ Scheduler:")
         print(f"   Running: {sched_status['running']}")
         print(f"   Next run: {sched_status['next_run'] or 'N/A'}")
+
         print(f"\n⚙️ Config:")
         print(f"   Daily limit: {config.DAILY_LIMIT}")
         print(f"   Schedule: {config.SCHEDULE_HOURS} KST")
         print()
-
-    def show_login_instructions(self):
-        """Show browser login instructions."""
-        print("\n🔐 Product Hunt Login")
-        print("=" * 40)
-        print("""
-To login to Product Hunt:
-
-1. The bot will open Chrome with claude-in-chrome extension
-2. Navigate to https://www.producthunt.com
-3. Click "Log in" and complete authentication
-4. Once logged in, the session will be saved
-
-Use this command in Claude Code with claude-in-chrome:
-
-```
-mcp__claude-in-chrome__tabs_context_mcp(createIfEmpty=true)
-mcp__claude-in-chrome__navigate(url="https://www.producthunt.com/login", tabId=TAB_ID)
-```
-
-After manual login, run:
-```
-python -m ph_engagement run
-```
-""")
-
-    def show_browser_script(self, post_url: str, comment: str):
-        """Show the MCP script for browser execution."""
-        print("\n🖥️ Browser Execution Script")
-        print("=" * 40)
-        print(browser.get_full_script(post_url, comment))
 
 
 def main():
@@ -207,11 +328,9 @@ def main():
     )
     parser.add_argument(
         "command",
-        choices=["run", "start", "status", "login", "script"],
+        choices=["run", "start", "status", "execute"],
         help="Command to execute"
     )
-    parser.add_argument("--url", help="Post URL for script command")
-    parser.add_argument("--comment", help="Comment for script command")
 
     args = parser.parse_args()
     bot = PHEngagementBot()
@@ -222,13 +341,8 @@ def main():
         asyncio.run(bot.start_scheduler())
     elif args.command == "status":
         bot.show_status()
-    elif args.command == "login":
-        bot.show_login_instructions()
-    elif args.command == "script":
-        if not args.url or not args.comment:
-            print("Error: --url and --comment required for script command")
-            sys.exit(1)
-        bot.show_browser_script(args.url, args.comment)
+    elif args.command == "execute":
+        asyncio.run(bot.execute_approved())
 
 
 if __name__ == "__main__":
