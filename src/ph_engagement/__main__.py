@@ -23,6 +23,7 @@ from .telegram_handler import TelegramHandler
 from .scheduler import scheduler
 from .session_manager import session_manager
 from .executor import executor
+from .browser_driver import browser_driver
 
 # Setup logging
 logging.basicConfig(
@@ -65,10 +66,29 @@ class PHEngagementBot:
         # Setup executor callbacks
         executor.set_notify_callback(self.notify_execution_result)
 
-        # Setup scheduler
+        # Setup scheduler with all callbacks
         scheduler.set_engagement_callback(self.run_engagement_check)
+        scheduler.set_session_check_callback(self.check_session)
+        scheduler.set_session_alert_callback(self.send_session_alert)
 
         logger.info("Bot initialized")
+
+    async def check_session(self) -> bool:
+        """Check if browser session is still valid."""
+        try:
+            return await browser_driver.check_session()
+        except Exception as e:
+            logger.error(f"Session check failed: {e}")
+            return False
+
+    async def send_session_alert(self, message: str):
+        """Send session alert via Telegram."""
+        if self.telegram_app:
+            await self.telegram_app.bot.send_message(
+                chat_id=config.TELEGRAM_CHAT_ID,
+                text=message,
+                parse_mode="HTML"
+            )
 
     # ============================================================
     # Telegram Callbacks
@@ -79,7 +99,6 @@ class PHEngagementBot:
         logger.info(f"Post approved: {post_id}, action: {action}")
 
         # Get post details from storage
-        # Note: The storage already has the post from when we sent approval
         approved_posts = storage.get_approved_posts()
         post = next((p for p in approved_posts if p["post_id"] == post_id), None)
 
@@ -95,52 +114,46 @@ class PHEngagementBot:
             # Notify user
             await self.telegram_app.bot.send_message(
                 chat_id=config.TELEGRAM_CHAT_ID,
-                text=f"📥 Added to execution queue.\n\nUse /ph_execute to run browser actions.",
+                text="📥 Added to execution queue.\n\nUse /ph_execute to run browser actions.",
                 parse_mode="HTML"
             )
         else:
             logger.warning(f"Approved post not found in storage: {post_id}")
 
-    async def on_login_request(self) -> int:
-        """Called when user requests login. Returns tab_id."""
+    async def on_login_request(self) -> tuple:
+        """Called when user requests login. Returns (success, screenshot_path)."""
         logger.info("Login requested via Telegram")
 
-        # In actual implementation, this would call claude-in-chrome MCP
-        # For now, return a placeholder and instruct manual execution
-        #
-        # The actual MCP calls would be:
-        # result = await mcp.tabs_context_mcp(createIfEmpty=True)
-        # tab_id = result.tabs[0].id
-        # await mcp.navigate(url="https://www.producthunt.com/login", tabId=tab_id)
+        try:
+            success, screenshot = await browser_driver.open_login_page()
+            return success, screenshot
+        except Exception as e:
+            logger.error(f"Login request failed: {e}")
+            return False, None
 
-        # Return placeholder - user will manually execute MCP commands
-        return 1  # Placeholder tab_id
-
-    async def on_login_verify(self) -> bool:
-        """Called to verify login status. Returns True if logged in."""
+    async def on_login_verify(self) -> tuple:
+        """Called to verify login status. Returns (is_logged_in, screenshot_path)."""
         logger.info("Verifying login status")
 
-        # In actual implementation, this would:
-        # 1. Navigate to PH
-        # 2. Look for profile element
-        # 3. Return True if found
-        #
-        # For now, trust user confirmation
-        return True
+        try:
+            is_logged_in, screenshot = await browser_driver.verify_login()
+            return is_logged_in, screenshot
+        except Exception as e:
+            logger.error(f"Login verification failed: {e}")
+            return False, None
 
-    async def on_execute_action(self, post_url: str, comment: str) -> bool:
-        """Execute browser action. Returns True if successful."""
-        logger.info(f"Execute action requested for: {post_url}")
+    async def on_execute_action(self, post_url: str, comment: str) -> tuple:
+        """Execute browser action. Returns (like_ok, comment_ok, screenshot_path)."""
+        logger.info(f"Executing action for: {post_url}")
 
-        # This would be called by executor or directly
-        # In actual implementation with MCP, this would run the browser script
-
-        # For now, log the script that should be executed
-        from .browser_actions import browser
-        script = browser.get_full_script(post_url, comment)
-        logger.info(f"MCP Script to execute:\n{script}")
-
-        return True  # Assume success for now
+        try:
+            like_ok, comment_ok, screenshot = await browser_driver.like_and_comment(
+                post_url, comment
+            )
+            return like_ok, comment_ok, screenshot
+        except Exception as e:
+            logger.error(f"Execute action failed: {e}")
+            return False, False, None
 
     async def notify_execution_result(self, post_id: str, success: bool, message: str):
         """Notify user of execution result via Telegram."""

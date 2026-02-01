@@ -9,12 +9,17 @@ anthropic>=0.18.0
 # Scheduling
 apscheduler>=3.10.0
 
-# Web Scraping (backup for when MCP unavailable)
+# Web Scraping
 httpx>=0.25.0
 beautifulsoup4>=4.12.0
+
+# Browser Automation
+playwright>=1.40.0
 
 # Environment
 python-dotenv>=1.0.0
 
 # Database
 # (uses built-in sqlite3)
+
+# Post-install: run `playwright install chromium`

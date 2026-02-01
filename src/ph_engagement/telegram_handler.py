@@ -4,9 +4,10 @@ Telegram Approval Handler
 import json
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Awaitable, Callable, List, Optional
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -38,15 +39,36 @@ class TelegramHandler:
     """Handles Telegram approval flow."""
 
     def __init__(self, on_approve: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
-                 on_login_request: Optional[Callable[[], Awaitable[int]]] = None,
-                 on_login_verify: Optional[Callable[[], Awaitable[bool]]] = None,
-                 on_execute: Optional[Callable[[str, str], Awaitable[bool]]] = None):
+                 on_login_request: Optional[Callable[[], Awaitable[tuple]]] = None,
+                 on_login_verify: Optional[Callable[[], Awaitable[tuple]]] = None,
+                 on_execute: Optional[Callable[[str, str], Awaitable[tuple]]] = None):
         self.on_approve = on_approve
-        self.on_login_request = on_login_request  # Returns tab_id
-        self.on_login_verify = on_login_verify    # Returns True if logged in
-        self.on_execute = on_execute              # Execute browser action
+        self.on_login_request = on_login_request  # Returns (success, screenshot_path)
+        self.on_login_verify = on_login_verify    # Returns (is_logged_in, screenshot_path)
+        self.on_execute = on_execute              # Returns (like_ok, comment_ok, screenshot_path)
         self.pending_edits: dict = {}
         self.app: Optional[Application] = None
+
+    async def send_screenshot(self, screenshot_path: Optional[Path], caption: str = "",
+                              chat_id: Optional[str] = None):
+        """Send a screenshot to Telegram."""
+        if not screenshot_path or not screenshot_path.exists():
+            return
+
+        if not self.app:
+            return
+
+        target = chat_id or config.TELEGRAM_CHAT_ID
+        try:
+            with open(screenshot_path, 'rb') as photo:
+                await self.app.bot.send_photo(
+                    chat_id=target,
+                    photo=InputFile(photo),
+                    caption=caption[:1024] if caption else None,
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logging.error(f"Failed to send screenshot: {e}")
 
     def setup(self, app: Application):
         """Register handlers with Telegram app."""
@@ -312,7 +334,7 @@ class TelegramHandler:
             await update.message.reply_text(
                 "🟡 Login already in progress.\n\n"
                 "Complete login in browser, then /ph_login_done\n"
-                "Or /ph_login_cancel to restart."
+                "Or send /ph_login again to restart."
             )
             return
 
@@ -320,7 +342,7 @@ class TelegramHandler:
             await update.message.reply_text(
                 "🟢 Already logged in!\n\n"
                 "Use /ph_session to check status.\n"
-                "Use /ph_login to re-login if needed."
+                "Sending /ph_login again will re-login."
             )
             # Continue anyway to allow re-login
 
@@ -333,30 +355,36 @@ class TelegramHandler:
 
         if self.on_login_request:
             try:
-                tab_id = await self.on_login_request()
-                session_manager.start_login(tab_id)
+                success, screenshot_path = await self.on_login_request()
 
-                await update.message.reply_text(
-                    "🖥️ <b>Browser Ready</b>\n\n"
-                    f"Tab ID: {tab_id}\n\n"
-                    "📋 <b>Next Steps:</b>\n"
-                    "1. Access your Mac Mini screen (VNC/Screen Share)\n"
-                    "2. Complete Product Hunt login (Google/Twitter)\n"
-                    "3. Once logged in, send /ph_login_done\n\n"
-                    "⏰ Login session will timeout in 10 minutes.",
-                    parse_mode="HTML"
-                )
+                if success:
+                    # Send screenshot of login page
+                    await self.send_screenshot(
+                        screenshot_path,
+                        "🖥️ <b>Browser Ready - Login Page</b>\n\n"
+                        "Complete login via VNC/Screen Share, then send /ph_login_done"
+                    )
+
+                    await update.message.reply_text(
+                        "📋 <b>Next Steps:</b>\n"
+                        "1. Access your Mac Mini (VNC/Screen Share)\n"
+                        "2. Complete login (Google/Twitter OAuth)\n"
+                        "3. Send /ph_login_done when complete\n\n"
+                        "⏰ Session will timeout in 10 minutes.",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await update.message.reply_text("❌ Failed to open browser.")
+
             except Exception as e:
                 logger.error(f"Login request failed: {e}")
                 await update.message.reply_text(f"❌ Failed to open browser: {e}")
         else:
             await update.message.reply_text(
-                "⚠️ Browser automation not configured.\n\n"
-                "Manual setup required:\n"
-                "1. Open Chrome with claude-in-chrome\n"
-                "2. Go to producthunt.com/login\n"
-                "3. Login manually\n"
-                "4. Send /ph_login_done"
+                "⚠️ Browser driver not configured.\n\n"
+                "Make sure Playwright is installed:\n"
+                "`pip install playwright && playwright install chromium`",
+                parse_mode="HTML"
             )
 
     async def cmd_login_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -371,17 +399,22 @@ class TelegramHandler:
 
         if self.on_login_verify:
             try:
-                is_logged_in = await self.on_login_verify()
+                is_logged_in, screenshot_path = await self.on_login_verify()
+
+                # Send verification screenshot
+                await self.send_screenshot(
+                    screenshot_path,
+                    "🔍 Login verification screenshot"
+                )
 
                 if is_logged_in:
-                    session_manager.confirm_login()
                     await update.message.reply_text(
                         "✅ <b>Login Successful!</b>\n\n"
                         "Bot is now ready to engage on Product Hunt.\n\n"
                         "Commands:\n"
                         "/ph_run - Run engagement check now\n"
-                        "/ph_stats - View today's stats\n"
-                        "/ph_session - Check session status",
+                        "/ph_execute - Execute approved posts\n"
+                        "/ph_stats - View today's stats",
                         parse_mode="HTML"
                     )
                 else:
@@ -389,7 +422,7 @@ class TelegramHandler:
                         "❌ <b>Login Not Detected</b>\n\n"
                         "Could not verify login. Please:\n"
                         "1. Make sure you completed the login\n"
-                        "2. Check if you're on producthunt.com\n"
+                        "2. Check the screenshot above\n"
                         "3. Try /ph_login_done again\n\n"
                         "Or /ph_login to restart.",
                         parse_mode="HTML"
@@ -448,7 +481,7 @@ class TelegramHandler:
         await update.message.reply_text(
             f"⚡ <b>Executing {len(approved)} approved posts...</b>\n\n"
             "Browser actions will run now.\n"
-            "You'll be notified of each result.",
+            "You'll receive a screenshot for each action.",
             parse_mode="HTML"
         )
 
@@ -456,28 +489,53 @@ class TelegramHandler:
         if self.on_execute:
             for post in approved:
                 try:
-                    success = await self.on_execute(
+                    like_ok, comment_ok, screenshot = await self.on_execute(
                         post["post_url"],
                         post["comment_text"]
                     )
-                    if success:
+
+                    if like_ok and comment_ok:
                         storage.update_status(post["post_id"], "executed")
                         storage.increment_stat("executed")
-                        await update.message.reply_text(
-                            f"✅ Executed: {post['post_title'][:30]}..."
+                        await self.send_screenshot(
+                            screenshot,
+                            f"✅ <b>Success:</b> {post['post_title'][:50]}\n"
+                            f"👍 Liked: Yes | 💬 Commented: Yes"
+                        )
+                    elif like_ok or comment_ok:
+                        # Partial success
+                        storage.update_status(post["post_id"], "executed")
+                        storage.increment_stat("executed")
+                        await self.send_screenshot(
+                            screenshot,
+                            f"⚠️ <b>Partial:</b> {post['post_title'][:50]}\n"
+                            f"👍 Liked: {'Yes' if like_ok else 'No'} | "
+                            f"💬 Commented: {'Yes' if comment_ok else 'No'}"
                         )
                     else:
-                        await update.message.reply_text(
-                            f"❌ Failed: {post['post_title'][:30]}..."
+                        await self.send_screenshot(
+                            screenshot,
+                            f"❌ <b>Failed:</b> {post['post_title'][:50]}"
                         )
+
+                    # Delay between posts
+                    import asyncio
+                    await asyncio.sleep(5)
+
                 except Exception as e:
                     await update.message.reply_text(
                         f"❌ Error: {post['post_title'][:30]}...\n{str(e)[:100]}"
                     )
+
+            await update.message.reply_text(
+                f"✅ <b>Execution complete!</b>\n\n"
+                f"Processed {len(approved)} posts.",
+                parse_mode="HTML"
+            )
         else:
             await update.message.reply_text(
-                "⚠️ Browser automation not configured.\n\n"
-                "Run `python -m ph_engagement execute` manually."
+                "⚠️ Browser driver not configured.\n\n"
+                "Make sure Playwright is installed."
             )
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
