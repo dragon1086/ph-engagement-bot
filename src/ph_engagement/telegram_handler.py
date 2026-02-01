@@ -19,8 +19,13 @@ from telegram.ext import (
 from .config import config
 from .scraper import PHPost
 from .storage import storage
+from .session_manager import session_manager, SessionState
 
 logger = logging.getLogger(__name__)
+
+# Login flow callbacks
+LOGIN_CONFIRM = "login_confirm:"
+LOGIN_CANCEL = "login_cancel:"
 
 # Callback prefixes
 APPROVE = "approve:"
@@ -32,8 +37,14 @@ SELECT = "select:"
 class TelegramHandler:
     """Handles Telegram approval flow."""
 
-    def __init__(self, on_approve: Optional[Callable[[str, str, str], Awaitable[None]]] = None):
+    def __init__(self, on_approve: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
+                 on_login_request: Optional[Callable[[], Awaitable[int]]] = None,
+                 on_login_verify: Optional[Callable[[], Awaitable[bool]]] = None,
+                 on_execute: Optional[Callable[[str, str], Awaitable[bool]]] = None):
         self.on_approve = on_approve
+        self.on_login_request = on_login_request  # Returns tab_id
+        self.on_login_verify = on_login_verify    # Returns True if logged in
+        self.on_execute = on_execute              # Execute browser action
         self.pending_edits: dict = {}
         self.app: Optional[Application] = None
 
@@ -41,9 +52,17 @@ class TelegramHandler:
         """Register handlers with Telegram app."""
         self.app = app
 
+        # Login commands
+        app.add_handler(CommandHandler("ph_login", self.cmd_login))
+        app.add_handler(CommandHandler("ph_login_done", self.cmd_login_done))
+        app.add_handler(CommandHandler("ph_session", self.cmd_session))
+
+        # Control commands
+        app.add_handler(CommandHandler("ph_run", self.cmd_run))
         app.add_handler(CommandHandler("ph_queue", self.cmd_queue))
         app.add_handler(CommandHandler("ph_stats", self.cmd_stats))
         app.add_handler(CommandHandler("ph_stop", self.cmd_stop))
+        app.add_handler(CommandHandler("ph_help", self.cmd_help))
 
         app.add_handler(CallbackQueryHandler(self.on_approve_click, pattern=f"^{APPROVE}"))
         app.add_handler(CallbackQueryHandler(self.on_skip_click, pattern=f"^{SKIP}"))
@@ -286,7 +305,158 @@ class TelegramHandler:
         await update.message.reply_text("🛑 Bot stopped. Use /ph_start to resume.")
         logger.warning("Bot stopped via Telegram")
 
+    async def cmd_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start login flow."""
+        if session_manager.session.state == SessionState.LOGIN_PENDING:
+            await update.message.reply_text(
+                "🟡 Login already in progress.\n\n"
+                "Complete login in browser, then /ph_login_done\n"
+                "Or /ph_login_cancel to restart."
+            )
+            return
 
-def create_handler(on_approve=None) -> TelegramHandler:
+        if session_manager.is_logged_in():
+            await update.message.reply_text(
+                "🟢 Already logged in!\n\n"
+                "Use /ph_session to check status.\n"
+                "Use /ph_login to re-login if needed."
+            )
+            # Continue anyway to allow re-login
+
+        await update.message.reply_text(
+            "🔐 <b>Starting Login Flow...</b>\n\n"
+            "Opening browser to Product Hunt login page.\n"
+            "Please wait...",
+            parse_mode="HTML"
+        )
+
+        if self.on_login_request:
+            try:
+                tab_id = await self.on_login_request()
+                session_manager.start_login(tab_id)
+
+                await update.message.reply_text(
+                    "🖥️ <b>Browser Ready</b>\n\n"
+                    f"Tab ID: {tab_id}\n\n"
+                    "📋 <b>Next Steps:</b>\n"
+                    "1. Access your Mac Mini screen (VNC/Screen Share)\n"
+                    "2. Complete Product Hunt login (Google/Twitter)\n"
+                    "3. Once logged in, send /ph_login_done\n\n"
+                    "⏰ Login session will timeout in 10 minutes.",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Login request failed: {e}")
+                await update.message.reply_text(f"❌ Failed to open browser: {e}")
+        else:
+            await update.message.reply_text(
+                "⚠️ Browser automation not configured.\n\n"
+                "Manual setup required:\n"
+                "1. Open Chrome with claude-in-chrome\n"
+                "2. Go to producthunt.com/login\n"
+                "3. Login manually\n"
+                "4. Send /ph_login_done"
+            )
+
+    async def cmd_login_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Confirm login complete."""
+        if session_manager.session.state != SessionState.LOGIN_PENDING:
+            await update.message.reply_text(
+                "❓ No login in progress.\n\nUse /ph_login to start."
+            )
+            return
+
+        await update.message.reply_text("🔍 Verifying login...")
+
+        if self.on_login_verify:
+            try:
+                is_logged_in = await self.on_login_verify()
+
+                if is_logged_in:
+                    session_manager.confirm_login()
+                    await update.message.reply_text(
+                        "✅ <b>Login Successful!</b>\n\n"
+                        "Bot is now ready to engage on Product Hunt.\n\n"
+                        "Commands:\n"
+                        "/ph_run - Run engagement check now\n"
+                        "/ph_stats - View today's stats\n"
+                        "/ph_session - Check session status",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await update.message.reply_text(
+                        "❌ <b>Login Not Detected</b>\n\n"
+                        "Could not verify login. Please:\n"
+                        "1. Make sure you completed the login\n"
+                        "2. Check if you're on producthunt.com\n"
+                        "3. Try /ph_login_done again\n\n"
+                        "Or /ph_login to restart.",
+                        parse_mode="HTML"
+                    )
+            except Exception as e:
+                logger.error(f"Login verify failed: {e}")
+                await update.message.reply_text(f"❌ Verification error: {e}")
+        else:
+            # No verify callback, trust the user
+            session_manager.confirm_login()
+            await update.message.reply_text(
+                "✅ <b>Login Confirmed!</b>\n\n"
+                "(Manual verification - browser check skipped)\n\n"
+                "Use /ph_run to start engagement.",
+                parse_mode="HTML"
+            )
+
+    async def cmd_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show session status."""
+        status = session_manager.get_status_message()
+        await update.message.reply_text(
+            f"🔐 <b>Session Status</b>\n\n{status}",
+            parse_mode="HTML"
+        )
+
+    async def cmd_run(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Trigger manual engagement run."""
+        if not session_manager.is_logged_in():
+            await update.message.reply_text(
+                "❌ Not logged in.\n\nUse /ph_login first."
+            )
+            return
+
+        await update.message.reply_text(
+            "🚀 Starting engagement check...\n\n"
+            "This will scrape PH and send approval requests."
+        )
+        # The actual run is triggered in __main__.py via callback
+
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show help message."""
+        await update.message.reply_text(
+            "🤖 <b>PH Engagement Bot</b>\n\n"
+            "<b>Login:</b>\n"
+            "/ph_login - Start login flow\n"
+            "/ph_login_done - Confirm login complete\n"
+            "/ph_session - Check session status\n\n"
+            "<b>Engagement:</b>\n"
+            "/ph_run - Run engagement check now\n"
+            "/ph_queue - Show pending approvals\n"
+            "/ph_stats - Today's statistics\n\n"
+            "<b>Control:</b>\n"
+            "/ph_stop - Emergency stop\n"
+            "/ph_help - This message\n\n"
+            "<b>Approval Buttons:</b>\n"
+            "✅ Approve - Like + comment with selected text\n"
+            "✏️ Edit - Write custom comment\n"
+            "❌ Skip - Skip this post",
+            parse_mode="HTML"
+        )
+
+
+def create_handler(on_approve=None, on_login_request=None,
+                   on_login_verify=None, on_execute=None) -> TelegramHandler:
     """Create handler instance."""
-    return TelegramHandler(on_approve=on_approve)
+    return TelegramHandler(
+        on_approve=on_approve,
+        on_login_request=on_login_request,
+        on_login_verify=on_login_verify,
+        on_execute=on_execute
+    )

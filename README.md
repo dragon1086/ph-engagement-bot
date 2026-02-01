@@ -66,31 +66,59 @@ This opens Chrome for manual login. Session cookies are saved automatically.
 
 ## Usage
 
-### Manual Run
+### First Time Login (Important!)
 
-```bash
-# Run once (scrape, generate, send approvals)
-python -m ph_engagement run
+Before the bot can engage, you need to login to Product Hunt:
 
-# Check status
-python -m ph_engagement status
+```
+1. Send /ph_login in Telegram
+2. Bot opens Chrome to PH login page
+3. Access your Mac Mini via VNC/Screen Share
+4. Complete login (Google/Twitter OAuth)
+5. Send /ph_login_done in Telegram
+6. Bot verifies and saves session
 ```
 
-### Scheduled Mode
+Session persists until it expires or you re-login.
+
+### Daily Operation
 
 ```bash
-# Start scheduler (runs at 9AM, 1PM, 5PM, 9PM KST)
+# Start the bot (recommended for Mac Mini)
 python -m ph_engagement start
 
-# Stop scheduler
-python -m ph_engagement stop
+# The bot will:
+# - Run at 9AM, 1PM, 5PM, 9PM KST
+# - Scrape PH for new posts
+# - Generate AI comments
+# - Send approval requests to Telegram
+# - Execute approved actions via browser
 ```
 
 ### Telegram Commands
 
+**Login:**
+- `/ph_login` - Start login flow (opens browser)
+- `/ph_login_done` - Confirm login complete
+- `/ph_session` - Check session status
+
+**Engagement:**
+- `/ph_run` - Run engagement check now
 - `/ph_queue` - Show pending approvals
-- `/ph_stats` - Show today's statistics
+- `/ph_stats` - Today's statistics
+
+**Control:**
 - `/ph_stop` - Emergency stop
+- `/ph_help` - Show all commands
+
+### CLI Commands
+
+```bash
+python -m ph_engagement run      # Single run
+python -m ph_engagement start    # Start scheduler daemon
+python -m ph_engagement status   # Show status
+python -m ph_engagement login    # Show login instructions
+```
 
 ## Configuration
 
