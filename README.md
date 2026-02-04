@@ -134,6 +134,92 @@ TARGET_CATEGORIES = [         # PH categories to monitor
 SCHEDULE_HOURS = [9, 13, 17, 21]  # Run times (KST)
 ```
 
+## Background Daemon (Mac Mini)
+
+### Option 1: nohup (Simple)
+
+```bash
+cd /path/to/ph-engagement-bot
+nohup ./venv/bin/python -m ph_engagement start > bot.log 2>&1 &
+echo $! > bot.pid
+
+# Check status
+tail -f bot.log
+
+# Stop
+kill $(cat bot.pid)
+```
+
+### Option 2: launchd (Recommended for Mac)
+
+Create `~/Library/LaunchAgents/com.ph-engagement-bot.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ph-engagement-bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/ph-engagement-bot/venv/bin/python</string>
+        <string>-m</string>
+        <string>ph_engagement</string>
+        <string>start</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/ph-engagement-bot</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/path/to/ph-engagement-bot/logs/bot.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/ph-engagement-bot/logs/bot.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
+```
+
+```bash
+# Load (start)
+launchctl load ~/Library/LaunchAgents/com.ph-engagement-bot.plist
+
+# Unload (stop)
+launchctl unload ~/Library/LaunchAgents/com.ph-engagement-bot.plist
+
+# Check status
+launchctl list | grep ph-engagement
+```
+
+### Option 3: tmux/screen (Interactive)
+
+```bash
+# Start tmux session
+tmux new -s phbot
+
+# Run bot
+cd /path/to/ph-engagement-bot
+./venv/bin/python -m ph_engagement start
+
+# Detach: Ctrl+B, then D
+
+# Reattach later
+tmux attach -t phbot
+```
+
+### Important Notes
+
+- **headless=False**: Browser window must be visible for CAPTCHA solving
+- **VNC Access**: Keep VNC/Screen Sharing enabled for manual intervention
+- **Login First**: Run `/ph_login` via Telegram before starting daemon
+
 ## Safety Notes
 
 - **Human-in-the-loop**: All actions require manual approval
