@@ -7,7 +7,7 @@ Semi-automated Product Hunt community engagement system with human-in-the-loop a
 - **Smart Scraping**: Monitors AI/Developer Tools categories on Product Hunt
 - **AI Comments**: Generates natural, helpful comments using Claude
 - **Telegram Approval**: Review and approve comments before posting
-- **Browser Automation**: Uses claude-in-chrome for actual engagement
+- **Browser Automation**: Uses Playwright with stealth mode for actual engagement
 - **Rate Limiting**: Configurable daily limits to stay safe
 
 ## Architecture
@@ -29,7 +29,7 @@ Semi-automated Product Hunt community engagement system with human-in-the-loop a
 │       │                                       │             │
 │       │                                       ▼             │
 │       │                              [Browser Action]       │
-│       │                              (claude-in-chrome)     │
+│       │                              (Playwright+Stealth)   │
 │       │                                       │             │
 │       └───────────────────────────────────────┘             │
 │                                                              │
@@ -104,6 +104,7 @@ python -m ph_engagement start
 
 **Engagement:**
 - `/ph_run` - Run engagement check now
+- `/ph_execute` - Execute approved posts (browser action)
 - `/ph_queue` - Show pending approvals
 - `/ph_stats` - Today's statistics
 

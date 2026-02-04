@@ -129,15 +129,27 @@ daily_stats (date, posts_found, approved, skipped, executed)
 | Issue | Solution |
 |-------|----------|
 | "Found 0 new posts" | All posts already in DB. Clear `ph_engagement.db` or wait for new launches |
-| CAPTCHA detected | Login manually via VNC, session will persist |
+| CAPTCHA detected | Clear `chrome_profile/`, re-login via `/ph_login` |
 | Telegram conflict | Kill all instances: `pkill -9 -f ph_engagement` |
 | Comment too generic | Check that `get_post_details()` is fetching full description |
+| Comment not posting | Check URL format - comments only work on `/posts/` URLs |
 
 ## Development Notes
 
+- **Comment Editor**: PH uses TipTap/ProseMirror (contenteditable div), not textarea
+  - Selector: `div.tiptap.ProseMirror[contenteditable="true"]`
+  - Use `.type()` instead of `.fill()` for contenteditable elements
+
+- **URL Format**: Scraper returns `/products/` URLs, but comments only work on `/posts/`
+  - Browser driver auto-converts: `/products/slug` → `/posts/slug`
+
+- **CAPTCHA avoidance**:
+  - Homepage warmup visit before navigating to posts
+  - Persistent Chrome profile maintains session trust
+  - `headless=False` reduces CAPTCHA triggers
+  - If persistent issues, clear `chrome_profile/` and re-login
+
 - **Scraper regex**: `r'\[(\d+)\\\\?\.\s*([^\]]+)\]\((https://www\.producthunt\.com/products/([^)]+))\)'`
   - Handles escaped backslash in Firecrawl markdown: `[1\. Product]`
-
-- **CAPTCHA avoidance**: Persistent profile is key. First login builds trust.
 
 - **Rate limits**: Sequential comment generation (not parallel) to avoid API limits.
