@@ -27,3 +27,7 @@
   - Added pre-comment screenshot for debugging
   - **Tested and confirmed working** - successfully posted comment on Dottie product
   - Added auto-conversion from `/products/` to `/posts/` URL (comments only work on /posts/)
+- [x] **Mac Mini daemon setup** (2026-02-05)
+  - Added `scripts/install-daemon.sh` for launchd setup
+  - Added `scripts/uninstall-daemon.sh`
+  - Documentation for nohup, launchd, tmux options
