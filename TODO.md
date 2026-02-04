@@ -2,43 +2,13 @@
 
 ## Known Issues
 
-### [ ] Comment posting fails while like succeeds
-- **Status**: Investigating
-- **Symptom**: `/ph_execute` shows "Liked: Yes | Commented: No"
-- **Possible causes**:
-  1. Comment textarea selector not matching (PH UI may have changed)
-  2. Submit button selector not found
-  3. Comment input requires click/focus before typing
-  4. Rate limiting on comments
-- **Debug steps**:
-  - Check screenshot for comment input visibility
-  - Verify selectors in `browser_driver.py:post_comment()`
-  - Test with browser DevTools to find correct selectors
-
-```python
-# Current selectors in post_comment()
-comment_selectors = [
-    'textarea[placeholder*="comment"]',
-    'textarea[placeholder*="Comment"]',
-    '[data-test="comment-input"]',
-    '.comment-form textarea',
-    'div[contenteditable="true"]',
-]
-```
+(No critical issues)
 
 ## Planned Improvements
-
-### [ ] Better comment selector detection
-- Use Playwright's inspector to find current PH comment input
-- Add fallback for contenteditable div
 
 ### [ ] Retry logic for failed comments
 - If comment fails, retry after 5s
 - Max 2 retries per post
-
-### [ ] Screenshot before/after comment
-- Take screenshot before attempting comment
-- Helps debug selector issues
 
 ## Completed
 
@@ -51,3 +21,9 @@ comment_selectors = [
 - [x] Full product description fetching
 - [x] CLAUDE.md documentation
 - [x] Architecture documentation
+- [x] **Comment posting fix** (2026-02-04)
+  - Root cause: PH uses TipTap/ProseMirror contenteditable div, not textarea
+  - Fix: Added `div.tiptap.ProseMirror` selector, use `.type()` instead of `.fill()`
+  - Added pre-comment screenshot for debugging
+  - **Tested and confirmed working** - successfully posted comment on Dottie product
+  - Added auto-conversion from `/products/` to `/posts/` URL (comments only work on /posts/)

@@ -66,6 +66,7 @@ class PHEngagementBot:
 
         # Setup executor callbacks
         executor.set_notify_callback(self.notify_execution_result)
+        executor.set_execute_callback(self.execute_browser_action)
 
         # Setup scheduler with all callbacks
         scheduler.set_engagement_callback(self.run_engagement_check)
@@ -156,6 +157,48 @@ class PHEngagementBot:
             logger.error(f"Execute action failed: {e}")
             return False, False, None
 
+    async def execute_browser_action(self, post_id: str, post_url: str, comment: str) -> bool:
+        """Execute browser action for executor callback. Returns success bool."""
+        logger.info(f"Executing browser action for: {post_id}")
+
+        try:
+            like_ok, comment_ok, screenshot = await browser_driver.like_and_comment(
+                post_url, comment
+            )
+
+            # Update storage with result
+            if like_ok and comment_ok:
+                storage.update_status(post_id, "executed")
+            elif like_ok or comment_ok:
+                storage.update_status(post_id, "partial")
+
+            # Send result to Telegram
+            result_msg = (
+                f"{'✅' if like_ok and comment_ok else '⚠️'} <b>Execution Result</b>\n\n"
+                f"Post: {post_id}\n"
+                f"Liked: {'Yes' if like_ok else 'No'} | Commented: {'Yes' if comment_ok else 'No'}"
+            )
+
+            if self.telegram_app:
+                if screenshot:
+                    await self.telegram_app.bot.send_photo(
+                        chat_id=config.TELEGRAM_CHAT_ID,
+                        photo=open(screenshot, 'rb'),
+                        caption=result_msg,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await self.telegram_app.bot.send_message(
+                        chat_id=config.TELEGRAM_CHAT_ID,
+                        text=result_msg,
+                        parse_mode="HTML"
+                    )
+
+            return like_ok and comment_ok
+        except Exception as e:
+            logger.error(f"Execute browser action failed: {e}")
+            return False
+
     async def notify_execution_result(self, post_id: str, success: bool, message: str):
         """Notify user of execution result via Telegram."""
         if self.telegram_app:
@@ -242,6 +285,10 @@ class PHEngagementBot:
             logger.error("Not logged in. Cannot execute.")
             print("❌ Not logged in. Use /ph_login first.")
             return
+
+        # Setup callbacks if not already done
+        if not executor.execute_callback:
+            await self.setup()
 
         await executor.process_queue()
 

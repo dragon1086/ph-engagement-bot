@@ -353,11 +353,22 @@ class BrowserDriver:
         """
         Post a comment on a Product Hunt post.
 
+        Product Hunt uses TipTap/ProseMirror rich text editor for comments.
+        This is a contenteditable div, not a regular textarea.
+
+        Note: Comments are only available on /posts/ URLs, not /products/ URLs.
+        This method auto-converts /products/ to /posts/ format.
+
         Returns:
             (success, screenshot_path)
         """
         if not self.page:
             await self.start()
+
+        # Convert /products/ URL to /posts/ URL (comments only work on /posts/)
+        if '/products/' in post_url:
+            post_url = post_url.replace('/products/', '/posts/')
+            logger.info(f"Converted URL to posts format: {post_url}")
 
         try:
             logger.info(f"Posting comment on: {post_url}")
@@ -367,20 +378,29 @@ class BrowserDriver:
                 await self.page.goto(post_url, wait_until='networkidle')
                 await asyncio.sleep(2)
 
-            # Find comment input
+            # Take screenshot before attempting comment (for debugging)
+            await self.take_screenshot("comment_before")
+
+            # Find comment input - PH uses TipTap/ProseMirror (contenteditable div)
+            # Order matters: most specific selectors first
             comment_selectors = [
+                'div.tiptap.ProseMirror[contenteditable="true"]',  # PH's TipTap editor
+                'div[role="textbox"][contenteditable="true"]',     # Accessible textbox
+                'form div[contenteditable="true"]',                # Any contenteditable in form
+                'div.ProseMirror[contenteditable="true"]',         # Generic ProseMirror
+                'textarea[placeholder*="think"]',                   # Fallback: "What do you think?"
                 'textarea[placeholder*="comment"]',
-                'textarea[placeholder*="Comment"]',
                 '[data-test="comment-input"]',
-                '.comment-form textarea',
-                'div[contenteditable="true"]',
             ]
 
             input_element = None
+            used_selector = None
             for selector in comment_selectors:
                 try:
                     input_element = await self.page.query_selector(selector)
                     if input_element:
+                        used_selector = selector
+                        logger.info(f"Found comment input with selector: {selector}")
                         break
                 except Exception:
                     continue
@@ -390,16 +410,31 @@ class BrowserDriver:
                 screenshot = await self.take_screenshot("comment_no_input")
                 return False, screenshot
 
-            # Click to focus and type
+            # For contenteditable divs, we need to click first, then type
+            # .fill() doesn't work on contenteditable - must use .type() or .press_sequentially()
             await input_element.click()
             await asyncio.sleep(0.5)
-            await input_element.fill(comment_text)
+
+            # Check if it's a contenteditable element
+            is_contenteditable = await input_element.get_attribute('contenteditable')
+
+            if is_contenteditable == 'true':
+                # For contenteditable, use type() which simulates keyboard input
+                await input_element.type(comment_text, delay=20)  # Small delay for natural typing
+                logger.info("Typed comment into contenteditable div")
+            else:
+                # For regular textarea/input, use fill()
+                await input_element.fill(comment_text)
+                logger.info("Filled comment into textarea")
+
             await asyncio.sleep(1)
 
             # Find and click submit button
+            # Look specifically for button with text "Comment" inside the form
             submit_selectors = [
-                'button[type="submit"]',
-                'button:has-text("Comment")',
+                'form button[type="submit"]:has-text("Comment")',  # Most specific
+                'button:has-text("Comment")',                       # Any Comment button
+                'form button[type="submit"]',                       # Any submit in form
                 'button:has-text("Post")',
                 '[data-test="submit-comment"]',
             ]
@@ -409,14 +444,33 @@ class BrowserDriver:
                 try:
                     button = await self.page.query_selector(selector)
                     if button:
-                        is_disabled = await button.get_attribute('disabled')
-                        if not is_disabled:
-                            await button.click()
-                            submitted = True
-                            logger.info("Comment submitted")
-                            break
-                except Exception:
+                        # Check button text to make sure it's the right one
+                        button_text = await button.text_content()
+                        if button_text and 'Comment' in button_text:
+                            is_disabled = await button.get_attribute('disabled')
+                            if not is_disabled:
+                                await button.click()
+                                submitted = True
+                                logger.info(f"Comment submitted via selector: {selector}")
+                                break
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
                     continue
+
+            # If we didn't find a Comment-specific button, try any submit
+            if not submitted:
+                for selector in submit_selectors:
+                    try:
+                        button = await self.page.query_selector(selector)
+                        if button:
+                            is_disabled = await button.get_attribute('disabled')
+                            if not is_disabled:
+                                await button.click()
+                                submitted = True
+                                logger.info(f"Comment submitted via fallback selector: {selector}")
+                                break
+                    except Exception:
+                        continue
 
             if not submitted:
                 logger.warning("Could not find/click submit button")
@@ -440,13 +494,38 @@ class BrowserDriver:
             (like_success, comment_success, screenshot_path)
             If CAPTCHA detected, returns (False, False, screenshot) with CAPTCHA screenshot
         """
-        if not self.page:
-            await self.start()
+        import random
 
-        # Navigate to post first
+        if not self.page:
+            # Use headless=False to avoid CAPTCHA detection
+            await self.start(headless=False)
+
+        # Convert /products/ URL to /posts/ URL (comments only work on /posts/)
+        if '/products/' in post_url:
+            post_url = post_url.replace('/products/', '/posts/')
+            logger.info(f"Converted URL to posts format: {post_url}")
+
+        # Warm up session by visiting homepage first (helps avoid CAPTCHA)
         try:
+            logger.info("Warming up session with homepage visit...")
+            await self.page.goto('https://www.producthunt.com', wait_until='domcontentloaded')
+            await asyncio.sleep(random.uniform(2, 4))
+
+            # Check for CAPTCHA on homepage
+            if await self.check_captcha():
+                logger.warning("CAPTCHA on homepage - waiting for resolution...")
+                screenshot = await self.take_screenshot("captcha_homepage")
+                # Wait up to 60 seconds for manual CAPTCHA resolution
+                if not await self.wait_for_captcha_resolution(60):
+                    return False, False, screenshot
+        except Exception as e:
+            logger.warning(f"Homepage warmup failed: {e}")
+
+        # Navigate to post
+        try:
+            logger.info(f"Navigating to post: {post_url}")
             await self.page.goto(post_url, wait_until='networkidle')
-            await asyncio.sleep(2)
+            await asyncio.sleep(random.uniform(2, 4))
         except Exception as e:
             logger.error(f"Failed to navigate: {e}")
             screenshot = await self.take_screenshot("navigate_error")
