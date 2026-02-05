@@ -180,6 +180,29 @@ class BrowserDriver:
 
         return False
 
+    async def check_404(self) -> bool:
+        """Check if page is a 404 error page."""
+        if not self.page:
+            return False
+
+        # Product Hunt 404 page indicators
+        indicators_404 = [
+            'text="We seem to have lost this page"',
+            'text="404"',
+            'text="Go to the homepage"',
+        ]
+
+        for selector in indicators_404:
+            try:
+                element = await self.page.query_selector(selector)
+                if element:
+                    logger.warning(f"404 page detected: {selector}")
+                    return True
+            except Exception:
+                continue
+
+        return False
+
     async def wait_for_captcha_resolution(self, timeout: int = 120) -> bool:
         """
         Wait for user to solve CAPTCHA manually.
@@ -536,6 +559,12 @@ class BrowserDriver:
             logger.warning("CAPTCHA detected! Manual intervention required.")
             screenshot = await self.take_screenshot("captcha_detected")
             # Return special result - caller should notify user
+            return False, False, screenshot
+
+        # Check for 404 page (product removed/invalid URL)
+        if await self.check_404():
+            logger.warning("404 page detected - product not found!")
+            screenshot = await self.take_screenshot("404_not_found")
             return False, False, screenshot
 
         like_ok, _ = await self.like_post(post_url)

@@ -529,24 +529,40 @@ class TelegramHandler:
                             f"💬 Commented: {'Yes' if comment_ok else 'No'}"
                         )
                     else:
-                        # Check if screenshot shows CAPTCHA
-                        await self.send_screenshot(
-                            screenshot,
-                            f"🛡️ <b>CAPTCHA Detected!</b>\n\n"
-                            f"Post: {post['post_title'][:50]}\n\n"
-                            f"Please solve the CAPTCHA via VNC/Screen Share,\n"
-                            f"then run /ph_execute again."
-                        )
-                        # Stop processing - user needs to solve CAPTCHA
-                        await update.message.reply_text(
-                            "⏸️ <b>Execution paused</b>\n\n"
-                            "CAPTCHA blocking automation.\n"
-                            "1. Connect to Mac via VNC\n"
-                            "2. Solve the CAPTCHA in browser\n"
-                            "3. Run /ph_execute again",
-                            parse_mode="HTML"
-                        )
-                        return  # Stop execution loop
+                        # Check screenshot filename to determine error type
+                        screenshot_name = str(screenshot) if screenshot else ""
+
+                        if "404" in screenshot_name:
+                            # 404 page - product not found
+                            await self.send_screenshot(
+                                screenshot,
+                                f"🔍 <b>404 - Product Not Found</b>\n\n"
+                                f"Post: {post['post_title'][:50]}\n\n"
+                                f"This product page no longer exists.\n"
+                                f"Marking as skipped and continuing..."
+                            )
+                            # Mark as skipped and continue to next post
+                            storage.update_status(post["post_id"], "skipped")
+                            continue
+                        else:
+                            # Assume CAPTCHA
+                            await self.send_screenshot(
+                                screenshot,
+                                f"🛡️ <b>CAPTCHA Detected!</b>\n\n"
+                                f"Post: {post['post_title'][:50]}\n\n"
+                                f"Please solve the CAPTCHA via VNC/Screen Share,\n"
+                                f"then run /ph_execute again."
+                            )
+                            # Stop processing - user needs to solve CAPTCHA
+                            await update.message.reply_text(
+                                "⏸️ <b>Execution paused</b>\n\n"
+                                "CAPTCHA blocking automation.\n"
+                                "1. Connect to Mac via VNC\n"
+                                "2. Solve the CAPTCHA in browser\n"
+                                "3. Run /ph_execute again",
+                                parse_mode="HTML"
+                            )
+                            return  # Stop execution loop
 
                     # Delay between posts
                     import asyncio
