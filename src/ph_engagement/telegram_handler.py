@@ -191,7 +191,10 @@ class TelegramHandler:
     async def on_approve_click(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle approve button."""
         query = update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            pass  # Callback may have expired if bot was busy
 
         data = query.data.replace(APPROVE, "")
         parts = data.split(":")
@@ -221,7 +224,10 @@ class TelegramHandler:
     async def on_skip_click(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle skip button."""
         query = update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            pass
 
         post_id = query.data.replace(SKIP, "")
         pending = storage.get_pending(post_id)
@@ -237,7 +243,10 @@ class TelegramHandler:
     async def on_edit_click(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle edit button."""
         query = update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            pass
 
         post_id = query.data.replace(EDIT, "")
         chat_id = query.message.chat_id
