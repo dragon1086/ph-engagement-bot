@@ -1,6 +1,7 @@
 """
 Telegram Approval Handler
 """
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -481,11 +482,19 @@ class TelegramHandler:
         )
 
         if self.on_run:
+            # Run in background so callback buttons remain responsive
+            asyncio.create_task(self._run_engagement(update))
+
+    async def _run_engagement(self, update: Update):
+        """Background wrapper for engagement check."""
+        try:
+            await self.on_run()
+        except Exception as e:
+            logger.error(f"Engagement run failed: {e}")
             try:
-                await self.on_run()
-            except Exception as e:
-                logger.error(f"Engagement run failed: {e}")
                 await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+            except Exception:
+                pass
 
     async def cmd_execute(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Execute approved posts via browser."""
