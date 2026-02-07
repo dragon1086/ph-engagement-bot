@@ -31,20 +31,57 @@ ph-engagement-bot/
 └── ph_engagement.db         # SQLite database (git-ignored)
 ```
 
-## Key Commands
+## Setup & Run (Mac Mini)
 
 ```bash
-# Start the bot (daemon mode with Telegram)
-python -m ph_engagement start
+# 1. Setup (최초 1회)
+cd /Users/rocky/Downloads/ph-engagement-bot
+python3.12 -m venv venv
+source venv/bin/activate
+pip install -e .
+pip install firecrawl-py playwright-stealth
+playwright install chromium
 
-# Single run (no scheduler)
-python -m ph_engagement run
+# 2. .env 파일 설정 (TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY 등)
+```
 
-# Check status
-python -m ph_engagement status
+### Daemon 시작/중지
 
-# Execute approved posts
-python -m ph_engagement execute
+```bash
+# 시작 (백그라운드 데몬)
+nohup /Users/rocky/Downloads/ph-engagement-bot/venv/bin/python -m ph_engagement start \
+  >> /Users/rocky/Downloads/ph-engagement-bot/bot.log 2>&1 &
+
+# 중지
+pkill -f "ph_engagement start"
+
+# 재시작 (중지 → SingletonLock 정리 → 시작)
+pkill -f "ph_engagement start" && sleep 3 \
+  && rm -f /Users/rocky/Downloads/ph-engagement-bot/chrome_profile/SingletonLock \
+  && nohup /Users/rocky/Downloads/ph-engagement-bot/venv/bin/python -m ph_engagement start \
+     >> /Users/rocky/Downloads/ph-engagement-bot/bot.log 2>&1 &
+```
+
+### CLI Commands
+
+```bash
+# venv 활성화 후 사용
+source /Users/rocky/Downloads/ph-engagement-bot/venv/bin/activate
+
+python -m ph_engagement start    # 스케줄러 데몬 시작
+python -m ph_engagement run      # 1회 실행
+python -m ph_engagement status   # 상태 확인
+python -m ph_engagement execute  # 승인된 포스트 실행
+```
+
+### 로그 확인
+
+```bash
+# 메인 로그
+tail -f /Users/rocky/Downloads/ph-engagement-bot/logs/ph_engagement.log
+
+# 프로세스 확인
+ps aux | grep ph_engagement | grep -v grep
 ```
 
 ## Telegram Commands
@@ -130,6 +167,7 @@ daily_stats (date, posts_found, approved, skipped, executed)
 |-------|----------|
 | "Found 0 new posts" | All posts already in DB. Clear `ph_engagement.db` or wait for new launches |
 | CAPTCHA detected | Clear `chrome_profile/`, re-login via `/ph_login` |
+| "Failed to open browser" / SingletonLock | `rm chrome_profile/SingletonLock` 후 재시작. 기존 Chrome 프로세스가 남아있으면 `pkill -f chrome_profile` |
 | Telegram conflict | Kill all instances: `pkill -9 -f ph_engagement` |
 | Comment too generic | Check that `get_post_details()` is fetching full description |
 | Comment not posting | Check URL format - comments only work on `/posts/` URLs |
