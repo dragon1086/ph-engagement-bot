@@ -47,6 +47,7 @@ class Config:
     PH_BASE_URL: str = "https://www.producthunt.com"
 
     # Comment generation settings
+    COMMENT_MODEL: str = "claude-sonnet-4-5-20250929"
     COMMENT_VARIATIONS: int = 3
     MAX_COMMENT_LENGTH: int = 500
     MIN_COMMENT_LENGTH: int = 50

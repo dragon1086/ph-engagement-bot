@@ -112,34 +112,59 @@ class Scraper:
             result = self.app.scrape(post_url, formats=['markdown'])
             markdown = result.markdown or ""
 
-            # Extract meaningful description (skip image links, headers, navigation)
+            # Extract meaningful description
             lines = []
             for line in markdown.split('\n'):
                 line = line.strip()
-                # Skip empty, images, links, headers, navigation items
                 if not line:
                     continue
-                if line.startswith('!') or line.startswith('#') or line.startswith('['):
+                # Skip images and standalone links
+                if line.startswith('!') or (line.startswith('[') and line.endswith(')')):
                     continue
-                if line.startswith('-') or line.startswith('•'):
+                # Skip top-level headers (# Title) but keep ## and below
+                if line.startswith('# ') and not line.startswith('## '):
                     continue
-                if len(line) < 20:  # Skip short lines (likely UI elements)
+                # Keep bullet points (feature lists are valuable context)
+                # Skip very short lines (likely UI elements like buttons)
+                if not line.startswith('-') and not line.startswith('•') and len(line) < 10:
                     continue
                 # This is likely content
                 lines.append(line)
-                if len(' '.join(lines)) > 500:
+                if len(' '.join(lines)) > 1500:
                     break
 
-            description = ' '.join(lines)[:1000]
+            description = ' '.join(lines)[:2000]
             logger.info(f"Got description ({len(description)} chars)")
+
+            # Extract maker name
+            maker_name = self._extract_maker(markdown)
+            if maker_name:
+                logger.info(f"Found maker: {maker_name}")
 
             return {
                 "description": description,
-                "maker_name": ""
+                "maker_name": maker_name
             }
         except Exception as e:
             logger.error(f"Error getting post details: {e}")
             return None
+
+    def _extract_maker(self, markdown: str) -> str:
+        """Try to extract maker/builder name from product page markdown."""
+        # Common patterns: "Made by Name", "Built by Name", "by Name"
+        patterns = [
+            r'(?:Made|Built|Created|Launched)\s+by\s+([A-Z][a-zA-Z\s]{1,30}?)(?:\n|\.|\|)',
+            r'(?:Maker|Hunter|Creator)[\s:]+([A-Z][a-zA-Z\s]{1,30}?)(?:\n|\.|\|)',
+            r'@(\w{2,20})',  # Twitter/X handle as fallback
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, markdown)
+            if match:
+                name = match.group(1).strip()
+                # Filter out common false positives
+                if name.lower() not in ('product hunt', 'the', 'a', 'an', 'this'):
+                    return name
+        return ""
 
     def _parse_markdown(self, markdown: str, category: str) -> List[PHPost]:
         """Parse posts from Firecrawl markdown."""
