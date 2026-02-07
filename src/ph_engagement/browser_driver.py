@@ -39,6 +39,7 @@ class BrowserDriver:
         self.screenshots_dir = config.BASE_DIR / "screenshots"
         self.screenshots_dir.mkdir(exist_ok=True)
         self._browser_ready = False  # Track if browser is ready for use
+        self._headless = None  # Track current headless mode
 
     async def start(self, headless: bool = True, use_profile: bool = True):
         """Start the browser.
@@ -47,9 +48,13 @@ class BrowserDriver:
             headless: Run without visible window
             use_profile: Use persistent Chrome profile (recommended for avoiding CAPTCHA)
         """
-        if self.browser and self._browser_ready:
-            logger.info("Reusing existing browser session")
-            return
+        if self._browser_ready and self.context:
+            if self._headless == headless:
+                logger.info("Reusing existing browser session")
+                return
+            else:
+                logger.info(f"Restarting browser: headless={headless} (was {self._headless})")
+                await self.stop(force=True)
 
         logger.info(f"Starting browser (headless={headless}, use_profile={use_profile})")
         self.playwright = await async_playwright().start()
@@ -103,6 +108,7 @@ class BrowserDriver:
         )
         await stealth.apply_stealth_async(self.page)
         self._browser_ready = True
+        self._headless = headless
         logger.info("Browser started with stealth mode and persistent profile")
 
     async def stop(self, force: bool = False):
@@ -127,6 +133,7 @@ class BrowserDriver:
         self.browser = None
         self.playwright = None
         self._browser_ready = False
+        self._headless = None
         logger.info("Browser stopped")
 
     async def save_cookies(self):
