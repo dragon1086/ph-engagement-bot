@@ -129,10 +129,19 @@ Uses `playwright-stealth` + persistent Chrome profile to avoid Cloudflare CAPTCH
 - Stealth patches `navigator.webdriver` and browser fingerprint
 
 ### Comment Generation
-Claude generates 3 comment options with:
-- English comment (for posting)
-- Korean translation (for reviewer understanding)
-- Product summary in Korean
+Claude (Sonnet 4.5, configurable via `config.COMMENT_MODEL`) generates 3 comment options, each with a **separate API call** using a different style:
+
+| Style | Description | Example pattern |
+|-------|-------------|-----------------|
+| `curious` | Specific technical question | "Does this work with monorepos?" |
+| `skeptic` | Compare with existing tools | "How does this compare to just using X?" |
+| `excited_user` | Real use-case scenario | "Been looking for exactly this for my CI pipeline" |
+
+- System prompt: Senior dev persona, casual 1-2 sentence style
+- Anti-AI pattern blocklist: blocks "I love how...", "Great to see...", generic praise, emoji
+- Each comment gets a separate Korean translation call
+- Product summary generated separately in Korean
+- Scraper extracts maker name from product page for natural @mentions
 
 ### Session Management
 - Login via `/ph_login` opens browser for manual OAuth
@@ -171,6 +180,7 @@ daily_stats (date, posts_found, approved, skipped, executed)
 | Telegram conflict | Kill all instances: `pkill -9 -f ph_engagement` |
 | Comment too generic | Check that `get_post_details()` is fetching full description |
 | Comment not posting | Check URL format - comments only work on `/posts/` URLs |
+| Approve button no response | `/ph_run`이 백그라운드로 실행되는지 확인. `asyncio.create_task` 사용해야 콜백 블로킹 안됨 |
 
 ## Development Notes
 
@@ -191,3 +201,11 @@ daily_stats (date, posts_found, approved, skipped, executed)
   - Handles escaped backslash in Firecrawl markdown: `[1\. Product]`
 
 - **Rate limits**: Sequential comment generation (not parallel) to avoid API limits.
+
+- **Telegram concurrent_updates**: python-telegram-bot 기본값이 `concurrent_updates=False`라서
+  `/ph_run` 같은 장시간 핸들러가 `await`하면 다른 모든 업데이트(콜백 버튼 포함)가 블로킹됨.
+  `cmd_run`은 `asyncio.create_task()`로 백그라운드 실행하여 해결.
+  `query.answer()`도 타임아웃 가능하므로 try/except로 감싸야 함.
+
+- **Description parsing**: Scraper는 bullet point(`-`, `•`)와 sub-header(`##`)를 포함해서
+  Claude에게 최대 2000자의 맥락 제공. maker 이름도 "Made by", "Built by" 패턴으로 추출 시도.
